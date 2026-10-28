@@ -3,7 +3,9 @@
 A record of **two units**. Root ADB over USB with no flashing: turn on Frameo's ADB toggle, accept
 the prompt, and `adb shell` is already uid 0. The only hard part on the first unit was the cable.
 The second unit replaced the stock WebView 74 with LineageOS WebView 155 by editing `/product`
-as root, and ran the Home HQ kiosk ([second unit](#second-unit-webview-155-and-the-kiosk)).
+as root, and now boots into the Home HQ kiosk with Frameo disabled. That needed a one-line init
+file, because this firmware leaves ending the boot animation to Frameo
+([second unit](#second-unit-webview-155-and-the-kiosk)).
 
 **Tested on:**
 
@@ -246,8 +248,62 @@ commands from a root `adb shell` were recorded the same way.
 `dashboard/kiosk` 1.1, built with `build.sh` (JDK 17, build-tools 34). After the swap, `adb install -r`
 and the default demo URL worked. On WebView 155 the whole demo dashboard rendered, including the
 JavaScript parts. At the stock density of 210 (about 1463×823 CSS px by calculation) nothing was cut off, with narrow
-dark bands on the left and right. The app used about 162 MB PSS. Running it as the Home app with
-Frameo disabled hasn't been tried on this unit yet.
+dark bands on the left and right. The app used about 162 MB PSS.
+
+### Home HQ as the Home app, Frameo disabled
+
+These steps were done in this order, each followed by a reboot:
+
+1. `am start … --ez home true`, then `cmd package set-home-activity com.wesbos.homehq/.Home`. Wait
+   until `<preferred-activities>` in `package-restrictions.xml` names `com.wesbos.homehq/.Home`
+   (about 6 s) before rebooting.
+2. `pm grant com.wesbos.homehq android.permission.WRITE_SECURE_SETTINGS`, then set
+   `enabled_accessibility_services` to `com.wesbos.homehq/com.wesbos.homehq.NavigationService` and
+   `accessibility_enabled` to `1`, for the floating Back and Dashboard buttons.
+3. With Frameo still enabled, reboot. Home HQ was in front, and the owner checked by hand that the
+   two-finger menu reached Android Settings → Apps and that the Dashboard button came back.
+4. `pm disable-user --user 0 net.frameo.frame` **and** `pm enable com.android.systemui` before the
+   same reboot. With Frameo gone, nothing turns SystemUI off at boot, and SystemUI provides the only
+   wallpaper. After the reboot: Home HQ was Home, Wi-Fi reconnected (the network is saved in Android,
+   `wifi_on=1`), USB ADB still worked, and the hand check passed again.
+
+In Settings, Frameo's App info then shows **ENABLE** greyed out, so turning Frameo back on needs ADB
+(`pm enable net.frameo.frame`). Its data (about 495 MB including received photos) stays in place.
+
+### The boot animation never ends without Frameo
+
+With Home HQ as Home, the Frameo boot logo stayed over the screen after every boot, even with
+SystemUI and its wallpaper back. Home HQ was running underneath and took touches. The cause is in
+this firmware's `/system/framework/services.jar`:
+
+- In stock Android 10, `WindowManagerService.performEnableScreen` sets `service.bootanim.exit` to `1`
+  once the Home app, keyguard and wallpaper are drawn. In this build, the method sets
+  `mBootAnimationStopped` and tells SurfaceFlinger the system has booted, but the `SystemProperties.set` call is gone.
+  The string `service.bootanim.exit` appears 0 times in either `classes.dex`. Read with `dexdump -d`
+  from build-tools 34.
+- `ActivityManagerService.systemReady` sets a vendor property, `service.bootanim.delay`, from a
+  vendor resource (`0x01110049`).
+- So the firmware leaves ending the animation to the Home app, which is Frameo (it has root through
+  the shipped `su`). Any other Home app leaves the logo up.
+
+`adb shell setprop service.bootanim.exit 1` clears it until the next reboot. The permanent fix that
+worked was a two-line init file. `/system` (`mmcblk0p4`, mounted as `/`) has no dm-verity, and its
+ext4 has no `shared_blocks`:
+
+```sh
+adb shell mount -o remount,rw /
+adb shell 'printf "on property:sys.boot_completed=1\n    setprop service.bootanim.exit 1\n" > /system/etc/init/homehq-bootanim.rc
+  chown root:root /system/etc/init/homehq-bootanim.rc
+  chmod 644 /system/etc/init/homehq-bootanim.rc
+  chcon u:object_r:system_file:s0 /system/etc/init/homehq-bootanim.rc
+  sync'
+adb shell mount -o remount,ro /
+```
+
+Check `/system` against your backup first. After a reboot with no manual step:
+`init.svc.bootanim=stopped`, `service.bootanim.exit=1`, verified boot `green`, and the dashboard on
+screen. Undo: remount `/` read-write and delete the file. The PF1506's stuck boot animation (#104,
+#118) may have the same cause; not checked.
 
 ## Guesses, not tested
 
